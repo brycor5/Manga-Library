@@ -34,8 +34,8 @@ function mapJikanToSeries(m: JikanManga): Omit<Series, 'id' | 'created_at' | 'up
 
 function MangaCard({ manga, onAdd, onWishlist, added }: {
   manga: JikanManga
-  onAdd: () => void
-  onWishlist: () => void
+  onAdd: (...args: any[]) => void
+  onWishlist: (...args: any[]) => void
   added: 'collection' | 'wishlist' | null
 }) {
   return (

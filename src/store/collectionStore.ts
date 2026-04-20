@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import axios from 'axios'
 import { supabase, isSupabaseConfigured } from '../lib/supabase'
-import type { Series, CollectionEntry, CollectionEntryWithSeries } from '../types'
+import type { Series, CollectionEntry, CollectionEntryWithSeries, GoogleBooksVolume } from '../types'
 
 const JIKAN_BASE = 'https://api.jikan.moe/v4'
 const RATE_LIMIT_MS = 400 // Jikan allows ~3 req/s
@@ -100,6 +100,7 @@ interface CollectionState {
   importEntries: (data: Array<{ series: Omit<Series, 'id' | 'created_at' | 'updated_at'>, entry: Omit<CollectionEntry, 'id' | 'series_id' | 'series'> }>) => Promise<{ imported: number; skipped: number }>
   enrichCovers: () => Promise<void>
   cancelEnrich: () => void
+  lookupByISBN: (isbn: string) => Promise<GoogleBooksVolume | null>
 }
 
 let enrichCancelled = false
@@ -226,6 +227,43 @@ export const useCollectionStore = create<CollectionState>((set, get) => ({
   cancelEnrich: () => {
     enrichCancelled = true
     set({ enrichProgress: null })
+  },
+
+  lookupByISBN: async (isbn: string): Promise<GoogleBooksVolume | null> => {
+    try {
+      const key = localStorage.getItem('google_books_api_key') || import.meta.env.VITE_GOOGLE_BOOKS_API_KEY || ''
+      const params: Record<string, string> = { q: `isbn:${isbn}`, maxResults: '1' }
+      if (key) params.key = key
+      const qs = new URLSearchParams(params).toString()
+      const res = await fetch(`https://www.googleapis.com/books/v1/volumes?${qs}`)
+      if (!res.ok) return null
+      const data = await res.json()
+      const item = data.items?.[0]
+      if (!item) return null
+      const info = item.volumeInfo
+      const ids: Array<{ type: string; identifier: string }> = info.industryIdentifiers || []
+      const isbnVal =
+        ids.find(x => x.type === 'ISBN_13')?.identifier ||
+        ids.find(x => x.type === 'ISBN_10')?.identifier ||
+        isbn
+      const links = info.imageLinks || {}
+      const thumbnail = (links.extraLarge || links.large || links.thumbnail || links.smallThumbnail || null)
+        ?.replace('zoom=1', 'zoom=3')
+        .replace('&edge=curl', '')
+        .replace('http://', 'https://') ?? null
+      return {
+        isbn: isbnVal,
+        title: info.title || '',
+        authors: info.authors || [],
+        publisher: info.publisher || null,
+        publishedDate: info.publishedDate || null,
+        description: info.description || null,
+        thumbnail,
+        pageCount: info.pageCount || null,
+      }
+    } catch {
+      return null
+    }
   },
 
   enrichCovers: async () => {

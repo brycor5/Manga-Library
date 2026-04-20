@@ -37,6 +37,15 @@ export default {
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
       },
+      keyframes: {
+        'scan-line': {
+          '0%, 100%': { top: '10%', opacity: '1' },
+          '50%': { top: '85%', opacity: '0.6' },
+        },
+      },
+      animation: {
+        'scan-line': 'scan-line 2s ease-in-out infinite',
+      },
     },
   },
   plugins: [],

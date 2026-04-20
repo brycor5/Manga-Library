@@ -76,6 +76,39 @@ export interface JikanSearchResponse {
   }
 }
 
+// ─── Google Books ────────────────────────────────────────────────────────────
+export interface GoogleBooksVolume {
+  isbn: string
+  title: string
+  authors: string[]
+  publisher: string | null
+  publishedDate: string | null
+  description: string | null
+  thumbnail: string | null
+  pageCount: number | null
+}
+
+// ─── Release watchlist / notifications ───────────────────────────────────────
+export interface WatchlistEntry {
+  id: string
+  series_id: string
+  mu_series_id: number | null
+  notify_inapp: boolean
+  notify_push: boolean
+  notify_email: boolean
+  created_at: string
+}
+
+export interface AppNotification {
+  id: string
+  series_id: string
+  volume_label: string
+  release_date: string | null
+  read_at: string | null
+  buy_links: { amazon?: string; bn?: string; crunchyroll?: string }
+  created_at: string
+}
+
 export interface DashboardStats {
   totalVolumes: number
   totalSeries: number
