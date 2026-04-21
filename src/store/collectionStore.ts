@@ -24,8 +24,7 @@ function cleanTitleForSearch(title: string): string {
 }
 
 // ─── Title similarity ──────────────────────────────────────────────────────────
-// Jaccard word-overlap. Returns 0–1. Used to validate that an API result actually
-// matches what we searched for (rejects spin-offs, wrong series, etc.)
+// Jaccard word-overlap. Returns 0–1.
 const SIMILARITY_THRESHOLD = 0.35
 
 function normTitle(s: string): string {
@@ -37,9 +36,13 @@ function normTitle(s: string): string {
     .trim()
 }
 
+// Series-name similarity: cleans BOTH titles before comparing so volume suffixes
+// and subtitles don't dilute the score.
+// "Naruto, Vol. 10: A Splendid Ninja" vs "Naruto, Vol. 10" → cleans to "Naruto"
+// vs "Naruto" → 1.0
 function titleSimilarity(search: string, result: string): number {
   const a = normTitle(cleanTitleForSearch(search))
-  const b = normTitle(result)
+  const b = normTitle(cleanTitleForSearch(result))   // ← also clean the result
   if (!a || !b) return 0
   if (a === b) return 1
   if (b.includes(a) || a.includes(b)) return 0.85
@@ -48,6 +51,20 @@ function titleSimilarity(search: string, result: string): number {
   const intersection = [...wa].filter(w => wb.has(w)).length
   const union = new Set([...wa, ...wb]).size
   return union === 0 ? 0 : intersection / union
+}
+
+// ─── Volume number detection ───────────────────────────────────────────────────
+// Returns the volume number from a title, or null for series-level titles.
+// "Naruto, Vol. 10: A Splendid Ninja" → 10
+// "Attack on Titan 3"                 → 3
+// "My Dress-Up Darling 02"            → 2
+// "Naruto"                            → null
+function extractVolumeNumber(title: string): number | null {
+  const m = title.match(/\b(?:vol(?:ume)?\.?\s*|#\s*)(\d+)\b/i)
+  if (m) return parseInt(m[1], 10)
+  const bare = title.match(/\s+0*(\d{1,3})\s*$/)
+  if (bare) return parseInt(bare[1], 10)
+  return null
 }
 
 // ─── URL safety ────────────────────────────────────────────────────────────────
@@ -102,6 +119,69 @@ async function fetchOpenLibraryCoverByISBN(isbn: string): Promise<string | null>
   } catch {
     return null
   }
+}
+
+// ─── Google Books — exact-title lookup ────────────────────────────────────────
+// Searches Google Books using the FULL stored title as a quoted phrase
+// (e.g. "Naruto, Vol. 10: A Splendid Ninja"). Because we search for an exact
+// string rather than keywords, we get the specific volume — not whatever
+// popular book Google decides is most relevant for a series search.
+//
+// Validation requires that the result has the SAME volume number as the stored
+// title. This prevents "Blue Box Vol. 2" from sneaking in when we asked for
+// "Blue Box Vol. 3".
+//
+// Returns null (not an error) when the book isn't found — the caller then falls
+// through to AniList/Jikan for the series-level cover.
+async function fetchGoogleBooksByExactTitle(
+  title: string,
+  apiKey?: string
+): Promise<string | null> {
+  const targetVol = extractVolumeNumber(title)
+  if (targetVol === null) return null   // not a volume-specific title
+
+  const key = apiKey || import.meta.env.VITE_GOOGLE_BOOKS_API_KEY || ''
+  const safeTitle = title.replace(/['"]/g, '').trim()
+
+  try {
+    await sleep(API_DELAY_MS)
+    const params: Record<string, string> = {
+      q: `"${safeTitle}"`,
+      maxResults: '5',
+      printType: 'books',
+    }
+    if (key) params.key = key
+
+    const res = await fetch(
+      `https://www.googleapis.com/books/v1/volumes?${new URLSearchParams(params)}`
+    )
+    if (!res.ok) return null
+    const data = await res.json()
+
+    for (const item of data.items || []) {
+      const info = item.volumeInfo
+      const resultTitle: string = info?.title || ''
+      const resultFull = `${resultTitle} ${info?.subtitle || ''}`.trim()
+
+      // Wrong volume number → skip immediately
+      const resultVol = extractVolumeNumber(resultFull)
+      if (resultVol !== targetVol) continue
+
+      // Series name must actually match (both cleaned, so subtitles/vol tags
+      // don't dilute the score — "Naruto Vol 10 A Splendid Ninja" → "Naruto")
+      const sim = titleSimilarity(title, resultTitle)
+      if (sim < SIMILARITY_THRESHOLD) continue
+
+      const links = info?.imageLinks
+      const raw = links?.extraLarge || links?.large || links?.thumbnail || links?.smallThumbnail
+      if (!raw) continue
+
+      const cover = sanitizeCoverUrl(raw)
+      if (isValidCoverUrl(cover)) return cover
+    }
+  } catch { /* fall through to series-level sources */ }
+
+  return null
 }
 
 // ─── AniList ───────────────────────────────────────────────────────────────────
@@ -473,17 +553,29 @@ export const useCollectionStore = create<CollectionState>((set, get) => ({
         let coverUrl: string | null = null
         let metaUpdates: Partial<Series> = {}
 
-        // ── 1. Open Library by ISBN ─────────────────────────────────────────
-        // Only available when an ISBN is stored (book was scanned with barcode
-        // scanner). This gives a cover for the specific physical volume.
+        const storedKey = localStorage.getItem('google_books_api_key') || undefined
+
+        // ── 1. Open Library by ISBN ────────────────────────────────────────
+        // Exact per-volume cover, available when an ISBN was captured by the
+        // barcode scanner.
         if (entry.series.isbn) {
           coverUrl = await fetchOpenLibraryCoverByISBN(entry.series.isbn)
         }
 
-        // ── 2. AniList ──────────────────────────────────────────────────────
-        // Searches by cleaned series title (volume numbers stripped). Returns
-        // the series cover art — the same image shown on every volume of a
-        // series, which is the accepted standard across all manga platforms.
+        // ── 2. Google Books — exact-title search ───────────────────────────
+        // Uses the FULL stored title as a quoted phrase query so Google Books
+        // finds the specific volume, not just the most popular book in the
+        // series. Skips automatically for series-level titles (no vol number).
+        // Validates that the result has the same volume number as the query.
+        if (!coverUrl) {
+          coverUrl = await fetchGoogleBooksByExactTitle(title, storedKey)
+        }
+
+        // ── 3. AniList ─────────────────────────────────────────────────────
+        // Reliable series-level cover from the authoritative manga database.
+        // Volume numbers are stripped before querying, so all volumes of a
+        // series get the same artwork — which is the fallback when a specific
+        // volume cover can't be found above.
         if (!coverUrl) {
           const aliResult = await fetchAniListCover(title)
           if (aliResult) {
@@ -492,7 +584,7 @@ export const useCollectionStore = create<CollectionState>((set, get) => ({
           }
         }
 
-        // ── 3. Jikan (MAL) fallback ─────────────────────────────────────────
+        // ── 4. Jikan (MAL) fallback ────────────────────────────────────────
         if (!coverUrl) {
           const jResult = await fetchJikanCover(title)
           if (jResult) {
