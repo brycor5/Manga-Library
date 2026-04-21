@@ -119,7 +119,10 @@ function EnrichBanner() {
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2 text-blue-300 text-sm font-medium">
             <Loader2 size={14} className="animate-spin" />
-            Fetching covers from MyAnimeList… {enrichProgress.done}/{enrichProgress.total}
+            Fetching covers… {enrichProgress.done}/{enrichProgress.total}
+            {enrichProgress.fixed > 0 && (
+              <span className="text-green-400 font-semibold">· {enrichProgress.fixed} found</span>
+            )}
           </div>
           <button onClick={cancelEnrich} className="text-blue-400 hover:text-white transition-colors">
             <XCircle size={16} />
@@ -138,25 +141,45 @@ function EnrichBanner() {
     )
   }
 
-  if (missingCount === 0 || entries.length === 0) return null
+  if (entries.length === 0) return null
 
   return (
-    <div className="mb-4 bg-ink-800 border border-ink-700 rounded-xl p-4 flex items-center justify-between gap-4">
+    <div className="mb-4 bg-ink-800 border border-ink-700 rounded-xl p-4 flex items-center justify-between gap-4 flex-wrap">
       <div>
-        <p className="text-white font-medium text-sm">
-          {missingCount} series missing cover art
-        </p>
-        <p className="text-ink-400 text-xs mt-0.5">
-          Auto-fetch covers from MyAnimeList for your whole collection
-        </p>
+        {missingCount > 0 ? (
+          <>
+            <p className="text-white font-medium text-sm">{missingCount} series missing cover art</p>
+            <p className="text-ink-400 text-xs mt-0.5">
+              Searches AniList → MAL → Google Books with title-matching to find the right cover
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="text-white font-medium text-sm">All covers loaded</p>
+            <p className="text-ink-400 text-xs mt-0.5">
+              Re-fetch to fix any wrong or low-quality covers
+            </p>
+          </>
+        )}
       </div>
-      <button
-        onClick={enrichCovers}
-        className="btn-primary flex items-center gap-2 text-sm flex-shrink-0"
-      >
-        <Sparkles size={14} />
-        Fetch All Covers
-      </button>
+      <div className="flex items-center gap-2 flex-shrink-0">
+        {missingCount > 0 && (
+          <button
+            onClick={() => enrichCovers()}
+            className="btn-primary flex items-center gap-2 text-sm"
+          >
+            <Sparkles size={14} />
+            Fetch Missing
+          </button>
+        )}
+        <button
+          onClick={() => enrichCovers({ forceRefetch: true })}
+          className="btn-secondary flex items-center gap-2 text-sm"
+        >
+          <Sparkles size={14} />
+          Re-fetch All
+        </button>
+      </div>
     </div>
   )
 }
