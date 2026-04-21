@@ -254,11 +254,18 @@ async function fetchGoogleBooksCover(
   }
 }
 
+// Returns true if a title is safe to use in English Google Books queries.
+// AniList sometimes returns CJK / Cyrillic canonical titles that make
+// queries useless — e.g. "NARUTO -ナルト-". We detect those and fall back.
+function isLatinTitle(t: string): boolean {
+  const nonLatin = (t.match(/[\u3000-\u9FFF\uAC00-\uD7AF\u0400-\u04FF]/g) || []).length
+  return nonLatin / Math.max(t.length, 1) < 0.15
+}
+
 // Volume-specific cover — preferred when the title contains a volume number.
-// canonicalTitle: the full series name from AniList/Jikan (e.g. "Demon Slayer:
-//   Kimetsu no Yaiba"). When present it disambiguates series that share a short
-//   name (e.g. "Demon Slayer" ↔ spin-off "Kimetsu Academy"). Falls back to
-//   cleanTitleForSearch(title) when not available.
+// canonicalTitle: the full series name from AniList (e.g. "Demon Slayer:
+//   Kimetsu no Yaiba"). Used only when it's Latin/English — prevents CJK
+//   canonical titles (e.g. "NARUTO -ナルト-") from polluting queries.
 async function fetchVolumeSpecificCover(
   title: string,
   volNum: number,
@@ -291,21 +298,47 @@ async function fetchVolumeSpecificCover(
     } catch { /* fall through */ }
   }
 
-  // ── 2. Full-title search — uses canonical title when available ────────────
-  // Using the canonical title (e.g. "Demon Slayer: Kimetsu no Yaiba") instead
-  // of the short cleaned title ("Demon Slayer") stops spin-offs / adaptations
-  // with a similar short name from winning the similarity race.
-  const baseTitle = canonicalTitle
-    ? cleanTitleForSearch(canonicalTitle)   // strip any trailing vol/season from canonical
-    : cleanTitleForSearch(title)
+  // ── 2. Build the search title ─────────────────────────────────────────────
+  // Prefer the AniList canonical title for disambiguation (e.g. "Demon Slayer:
+  // Kimetsu no Yaiba" beats just "Demon Slayer"), BUT only if it's Latin so we
+  // don't send CJK characters to Google Books.
+  const usableCanonical =
+    canonicalTitle && isLatinTitle(canonicalTitle)
+      ? cleanTitleForSearch(canonicalTitle)
+      : null
+  const baseTitle = usableCanonical || cleanTitleForSearch(title)
 
   // Strip chars that confuse quoted Google Books queries (colons, parens, etc.)
   const safeTitle = baseTitle.replace(/[:"'()[\]]/g, ' ').replace(/\s+/g, ' ').trim()
 
+  // The full stored title sometimes has a subtitle (e.g. "Naruto, Vol. 10: A
+  // Splendid Ninja"). Searching for the EXACT full title is the most precise
+  // query — add it as the first attempt.
+  const exactTitle = title.replace(/['"]/g, '').trim()
+
   const queries = [
+    `"${exactTitle}"`,                                 // exact stored title (most precise)
     `"${safeTitle}" "volume ${volNum}" manga`,
     `"${safeTitle}" "vol ${volNum}" manga`,
     `intitle:"${safeTitle}" intitle:"${volNum}"`,
+  ]
+
+  // ── 3. Volume-number validation patterns ─────────────────────────────────
+  // BUG-FIX: the old bare `\b${volNum}\b` pattern was too loose — it matched
+  // ANY occurrence of the digit (e.g. "Vol 2" in a subtitle would pass the
+  // check for vol 16 if "16" happened to appear in a review snippet).
+  // New patterns require the number to appear in a genuine volume context:
+  //   • "Vol. 3" / "vol 03" (explicit "vol" prefix)
+  //   • "Volume 3" (long form)
+  //   • "#3" (comic-book hash format)
+  //   • Title ends with bare number: "Attack on Titan 3" / "Silent Voice 02"
+  //   • Zero-padded variants: "02" for volume 2
+  const volStr = String(volNum)
+  const volPatterns = [
+    new RegExp(`vol\\.?\\s*0*${volStr}\\b`, 'i'),          // "Vol. 3", "vol 03"
+    new RegExp(`volume\\s*0*${volStr}\\b`, 'i'),            // "Volume 3"
+    new RegExp(`#\\s*0*${volStr}\\b`, 'i'),                 // "#3"
+    new RegExp(`[\\s,]0*${volStr}\\s*$`),                   // ends with " 3", ", 3", " 03"
   ]
 
   for (const q of queries) {
@@ -323,9 +356,9 @@ async function fetchVolumeSpecificCover(
       if (!res.ok) continue
       const data = await res.json()
 
-      // Collect all valid candidates and pick the BEST match, not just the first
-      // above the threshold. This prevents a shorter/different spin-off title
-      // from winning because it happened to appear first in the result list.
+      // Collect all valid candidates and pick the BEST match, not just the
+      // first above the threshold. This stops spin-offs that happen to rank
+      // first from winning over the correct series.
       let bestCover: string | null = null
       let bestScore = 0
 
@@ -333,20 +366,14 @@ async function fetchVolumeSpecificCover(
         const info = item.volumeInfo
         const resultTitle: string = info?.title || ''
 
-        // Must match the series name — score against both the base title we
-        // searched with AND the original entry title (whichever is higher).
+        // Score against both the safe query title AND the original entry title
         const simBase = titleSimilarity(safeTitle, resultTitle)
         const simOrig = titleSimilarity(title, resultTitle)
         const sim = Math.max(simBase, simOrig)
         if (sim < SIMILARITY_THRESHOLD) continue
 
-        // Must mention the right volume number somewhere in title or subtitle
+        // Must confirm the correct volume number in the result title/subtitle
         const fullText = `${resultTitle} ${info?.subtitle || ''}`.toLowerCase()
-        const volPatterns = [
-          new RegExp(`\\b${volNum}\\b`),
-          new RegExp(`vol\\.?\\s*${volNum}\\b`, 'i'),
-          new RegExp(`volume\\s*${volNum}\\b`, 'i'),
-        ]
         if (!volPatterns.some(p => p.test(fullText))) continue
 
         const links = info?.imageLinks
