@@ -10,8 +10,8 @@ const API_DELAY_MS = 200    // Polite delay between other API calls
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
 // ─── Title cleaning ───────────────────────────────────────────────────────────
-// Only remove trailing standalone numbers and obvious volume/edition suffixes.
-// Keep subtitle punctuation so "Re:Zero" or "No Game No Life" still matches.
+// Strips volume/edition suffixes to get the bare series name for AniList/Jikan.
+// e.g. "Attack on Titan Vol. 2" → "Attack on Titan"
 function cleanTitleForSearch(title: string): string {
   return title
     .replace(/\s*[,:–-]\s*(vol(ume)?|season|part|omnibus|deluxe|box\s*set)\b.*/i, '')
@@ -19,6 +19,24 @@ function cleanTitleForSearch(title: string): string {
     .replace(/\s+#\d+.*/i, '')
     .replace(/\s+\(\d{4}\)$/, '')   // trailing year
     .trim()
+}
+
+// ─── Volume number detection ──────────────────────────────────────────────────
+// Extracts the volume number from a title if present.
+// "Attack on Titan Vol. 3" → 3
+// "My Hero Academia #12"   → 12
+// "Naruto"                 → null  (series-level, no volume)
+function extractVolumeNumber(title: string): number | null {
+  const match = title.match(
+    /\b(?:vol(?:ume)?\.?\s*|#\s*)(\d+)\b/i
+  )
+  if (match) return parseInt(match[1], 10)
+  // Bare trailing number: "One Piece 101" but NOT "Deadpool 2099" (too ambiguous)
+  // Only treat it as a volume if the number is preceded by the series title with
+  // no other context word between them.
+  const bare = title.match(/\s+(\d{1,3})$/)
+  if (bare) return parseInt(bare[1], 10)
+  return null
 }
 
 // ─── Title similarity ─────────────────────────────────────────────────────────
@@ -194,6 +212,7 @@ async function fetchJikanCover(title: string): Promise<JikanResult | null> {
 }
 
 // ─── Google Books ─────────────────────────────────────────────────────────────
+// Generic series-level cover (used as last resort when no volume number).
 async function fetchGoogleBooksCover(
   title: string,
   apiKey?: string
@@ -204,7 +223,7 @@ async function fetchGoogleBooksCover(
     q: `intitle:"${cleanTitle}" manga`,
     maxResults: '5',
     printType: 'books',
-    // Removed langRestrict so we find translated editions in any language
+    // langRestrict intentionally omitted — we want all language editions
   }
   if (key) params.key = key
 
@@ -233,6 +252,94 @@ async function fetchGoogleBooksCover(
   } catch {
     return null
   }
+}
+
+// Volume-specific cover — preferred when the title contains a volume number.
+// Uses the FULL title (not cleaned) so Google Books finds the specific edition.
+// Falls back to ISBN lookup first if an isbn is available (most precise).
+async function fetchVolumeSpecificCover(
+  title: string,
+  volNum: number,
+  isbn: string | null,
+  apiKey?: string
+): Promise<string | null> {
+  const key = apiKey || import.meta.env.VITE_GOOGLE_BOOKS_API_KEY || ''
+
+  // ── 1. ISBN lookup — exact match, zero ambiguity ──────────────────────────
+  if (isbn) {
+    try {
+      const params: Record<string, string> = { q: `isbn:${isbn}`, maxResults: '1' }
+      if (key) params.key = key
+      const res = await fetch(
+        `https://www.googleapis.com/books/v1/volumes?${new URLSearchParams(params)}`
+      )
+      if (res.ok) {
+        const data = await res.json()
+        const item = data.items?.[0]
+        if (item) {
+          const links = item.volumeInfo?.imageLinks || {}
+          const raw = links.extraLarge || links.large || links.thumbnail || links.smallThumbnail
+          if (raw) {
+            const cover = sanitizeCoverUrl(raw)
+            if (isValidCoverUrl(cover)) return cover
+          }
+        }
+      }
+    } catch { /* fall through */ }
+  }
+
+  // ── 2. Full-title search — keeps "Vol 2", "Volume 3", "#5", etc. ──────────
+  // Try several query formulations and pick the first with a matching cover.
+  const seriesTitle = cleanTitleForSearch(title)
+  const queries = [
+    `"${seriesTitle}" "volume ${volNum}" manga`,
+    `"${seriesTitle}" "vol ${volNum}" manga`,
+    `intitle:"${seriesTitle}" intitle:"${volNum}"`,
+  ]
+
+  for (const q of queries) {
+    try {
+      await sleep(API_DELAY_MS)
+      const params: Record<string, string> = {
+        q,
+        maxResults: '5',
+        printType: 'books',
+      }
+      if (key) params.key = key
+      const res = await fetch(
+        `https://www.googleapis.com/books/v1/volumes?${new URLSearchParams(params)}`
+      )
+      if (!res.ok) continue
+      const data = await res.json()
+
+      for (const item of data.items || []) {
+        const info = item.volumeInfo
+        const resultTitle: string = info?.title || ''
+
+        // Must match the series name
+        const seriesSim = titleSimilarity(seriesTitle, resultTitle)
+        if (seriesSim < SIMILARITY_THRESHOLD) continue
+
+        // Must mention the right volume number somewhere in title or subtitle
+        const fullText = `${resultTitle} ${info?.subtitle || ''}`.toLowerCase()
+        const volPatterns = [
+          new RegExp(`\\b${volNum}\\b`),
+          new RegExp(`vol\\.?\\s*${volNum}\\b`, 'i'),
+          new RegExp(`volume\\s*${volNum}\\b`, 'i'),
+        ]
+        if (!volPatterns.some(p => p.test(fullText))) continue
+
+        const links = info?.imageLinks
+        const raw = links?.extraLarge || links?.large || links?.thumbnail || links?.smallThumbnail
+        if (!raw) continue
+
+        const cover = sanitizeCoverUrl(raw)
+        if (isValidCoverUrl(cover)) return cover
+      }
+    } catch { /* try next query */ }
+  }
+
+  return null
 }
 
 // ─── Store interface ──────────────────────────────────────────────────────────
@@ -483,30 +590,66 @@ export const useCollectionStore = create<CollectionState>((set, get) => ({
         let coverUrl: string | null = null
         let metaUpdates: Partial<Series> = {}
 
-        // ── 1. AniList (primary for everything) ──────────────────────────
-        const aliResult = await fetchAniListCover(title)
-        if (aliResult) {
-          coverUrl = aliResult.cover
-          metaUpdates = aliResult.meta
-        }
+        const volNum = extractVolumeNumber(title)
+        const storedKey = localStorage.getItem('google_books_api_key') || undefined
 
-        // ── 2. Jikan fallback ─────────────────────────────────────────────
-        if (!coverUrl) {
-          const jResult = await fetchJikanCover(title)
-          if (jResult) {
-            coverUrl = jResult.cover
-            // Merge meta — prefer AniList descriptions when available
-            metaUpdates = { ...jResult.meta, ...metaUpdates }
+        if (volNum !== null) {
+          // ── Volume-specific entry (e.g. "Attack on Titan Vol. 3") ────────
+          // Google Books has per-volume covers; AniList/Jikan only have the
+          // series cover (always Vol. 1), so we skip their cover for these.
+
+          // ── 1. Google Books volume-specific cover (primary) ───────────────
+          coverUrl = await fetchVolumeSpecificCover(
+            title,
+            volNum,
+            entry.series.isbn,
+            storedKey
+          )
+
+          // ── 2. AniList — metadata only (their cover is always series/vol-1) ─
+          const aliResult = await fetchAniListCover(title)
+          if (aliResult) {
+            metaUpdates = aliResult.meta
+            // NOTE: intentionally NOT using aliResult.cover — AniList always
+            // returns the series cover (vol 1). Using it here would reproduce
+            // the exact bug we're fixing.
           }
-        }
 
-        // ── 3. Google Books last resort ───────────────────────────────────
-        if (!coverUrl) {
-          await sleep(API_DELAY_MS)
-          const storedKey = localStorage.getItem('google_books_api_key') || undefined
-          const gbResult = await fetchGoogleBooksCover(title, storedKey)
-          if (gbResult) {
-            coverUrl = gbResult.cover
+          // ── 3. Jikan — metadata only for the same reason ─────────────────
+          if (!metaUpdates.description || !metaUpdates.total_volumes) {
+            const jResult = await fetchJikanCover(title)
+            if (jResult) {
+              metaUpdates = { ...jResult.meta, ...metaUpdates }
+            }
+          }
+        } else {
+          // ── Series-level entry (no volume number in title) ────────────────
+          // Best path: AniList → Jikan → Google Books
+
+          // ── 1. AniList ────────────────────────────────────────────────────
+          const aliResult = await fetchAniListCover(title)
+          if (aliResult) {
+            coverUrl = aliResult.cover
+            metaUpdates = aliResult.meta
+          }
+
+          // ── 2. Jikan fallback ─────────────────────────────────────────────
+          if (!coverUrl) {
+            const jResult = await fetchJikanCover(title)
+            if (jResult) {
+              coverUrl = jResult.cover
+              // Merge meta — prefer AniList descriptions when available
+              metaUpdates = { ...jResult.meta, ...metaUpdates }
+            }
+          }
+
+          // ── 3. Google Books last resort ───────────────────────────────────
+          if (!coverUrl) {
+            await sleep(API_DELAY_MS)
+            const gbResult = await fetchGoogleBooksCover(title, storedKey)
+            if (gbResult) {
+              coverUrl = gbResult.cover
+            }
           }
         }
 
