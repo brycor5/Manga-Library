@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import SetupBanner from './SetupBanner'
 import ScrollToTop from './ScrollToTop'
+import NotificationBell from './NotificationBell'
 import {
   LayoutDashboard,
   Library,
@@ -9,11 +10,13 @@ import {
   Star,
   BookOpen,
   Settings,
+  ScanLine,
 } from 'lucide-react'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/collection', label: 'My Collection', icon: Library },
+  { to: '/scan', label: 'Scan Book', icon: ScanLine },
   { to: '/browse', label: 'Browse', icon: Search },
   { to: '/import', label: 'Import CSV', icon: Upload },
   { to: '/rankings', label: 'Rankings', icon: Star },
@@ -58,8 +61,10 @@ export default function Layout() {
           ))}
         </nav>
 
-        <div className="p-4 border-t border-ink-800 hidden lg:block">
-          <p className="text-ink-600 text-xs">Manga Library v0.1</p>
+        {/* Notification bell + version */}
+        <div className="p-3 border-t border-ink-800 flex items-center justify-center lg:justify-between">
+          <p className="text-ink-600 text-xs hidden lg:block">Manga Library v0.2</p>
+          <NotificationBell />
         </div>
       </aside>
 

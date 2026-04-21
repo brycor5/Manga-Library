@@ -5,6 +5,9 @@ import {
   ChevronDown, Edit2, Save, X
 } from 'lucide-react'
 import { useCollectionStore } from '../store/collectionStore'
+import { useNotificationStore } from '../store/notificationStore'
+import WatchlistToggle from '../components/WatchlistToggle'
+import WatchlistSettings from '../components/WatchlistSettings'
 import type { CollectionEntryWithSeries, ReadingStatus } from '../types'
 
 const STATUS_OPTIONS: ReadingStatus[] = ['Reading', 'Completed', 'Plan to Read', 'Dropped', 'On Hold']
@@ -60,6 +63,9 @@ export default function SeriesDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const { entries, updateEntry, updateSeries, deleteEntry } = useCollectionStore()
+  const { fetchWatchlist, isWatched } = useNotificationStore()
+
+  useEffect(() => { fetchWatchlist() }, [fetchWatchlist])
 
   const entry = entries.find(e => e.id === id) as CollectionEntryWithSeries | undefined
 
@@ -113,28 +119,32 @@ export default function SeriesDetail() {
           </div>
 
           {/* Quick actions */}
-          <div className="flex gap-2 mb-4">
-            <button
-              onClick={() => handleUpdate({ wishlist: !entry.wishlist })}
-              className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg border text-sm font-medium transition-colors ${
-                entry.wishlist ? 'bg-accent-600/20 border-accent-600/50 text-accent-400' : 'bg-ink-800 border-ink-700 text-ink-400 hover:text-white hover:bg-ink-700'
-              }`}
-            >
-              <Heart size={15} className={entry.wishlist ? 'fill-accent-500' : ''} />
-              {entry.wishlist ? 'Wishlisted' : 'Wishlist'}
-            </button>
-            <button
-              onClick={() => handleUpdate({
-                is_complete_in_collection: true,
-                volumes_owned: s.total_volumes || entry.volumes_owned,
-              })}
-              className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg border text-sm font-medium transition-colors ${
-                entry.is_complete_in_collection ? 'bg-green-600/20 border-green-600/50 text-green-400' : 'bg-ink-800 border-ink-700 text-ink-400 hover:text-white hover:bg-ink-700'
-              }`}
-            >
-              <CheckCircle size={15} />
-              {entry.is_complete_in_collection ? 'Complete' : 'Mark Complete'}
-            </button>
+          <div className="flex flex-col gap-2 mb-4">
+            <div className="flex gap-2">
+              <button
+                onClick={() => handleUpdate({ wishlist: !entry.wishlist })}
+                className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg border text-sm font-medium transition-colors ${
+                  entry.wishlist ? 'bg-accent-600/20 border-accent-600/50 text-accent-400' : 'bg-ink-800 border-ink-700 text-ink-400 hover:text-white hover:bg-ink-700'
+                }`}
+              >
+                <Heart size={15} className={entry.wishlist ? 'fill-accent-500' : ''} />
+                {entry.wishlist ? 'Wishlisted' : 'Wishlist'}
+              </button>
+              <button
+                onClick={() => handleUpdate({
+                  is_complete_in_collection: true,
+                  volumes_owned: s.total_volumes || entry.volumes_owned,
+                })}
+                className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg border text-sm font-medium transition-colors ${
+                  entry.is_complete_in_collection ? 'bg-green-600/20 border-green-600/50 text-green-400' : 'bg-ink-800 border-ink-700 text-ink-400 hover:text-white hover:bg-ink-700'
+                }`}
+              >
+                <CheckCircle size={15} />
+                {entry.is_complete_in_collection ? 'Complete' : 'Mark Complete'}
+              </button>
+            </div>
+            <WatchlistToggle seriesId={entry.series_id} seriesTitle={s.title} language={s.language} />
+            {isWatched(entry.series_id) && <WatchlistSettings seriesId={entry.series_id} />}
           </div>
 
           {/* ISBN/UPC */}

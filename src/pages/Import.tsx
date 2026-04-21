@@ -4,7 +4,7 @@ import { Upload, FileText, AlertCircle, CheckCircle, ChevronRight, X } from 'luc
 import { useCollectionStore } from '../store/collectionStore'
 import type { Series, CollectionEntry, ReadingStatus, Language, Format, Demographic } from '../types'
 
-const APP_FIELDS = [
+const APP_FIELDS: Array<{ key: string; label: string; required?: boolean }> = [
   { key: 'title', label: 'Title', required: true },
   { key: 'author', label: 'Author' },
   { key: 'volumes_owned', label: 'Volumes Owned' },
@@ -17,9 +17,9 @@ const APP_FIELDS = [
   { key: 'notes', label: 'Notes' },
   { key: 'genre', label: 'Genre' },
   { key: 'demographic', label: 'Demographic' },
-] as const
+]
 
-type AppFieldKey = typeof APP_FIELDS[number]['key']
+type AppFieldKey = string
 
 const AUTO_MATCH: Record<string, AppFieldKey> = {
   title: 'title', series: 'title', name: 'title', manga: 'title',
