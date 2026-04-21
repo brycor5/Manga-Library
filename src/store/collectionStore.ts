@@ -255,13 +255,16 @@ async function fetchGoogleBooksCover(
 }
 
 // Volume-specific cover — preferred when the title contains a volume number.
-// Uses the FULL title (not cleaned) so Google Books finds the specific edition.
-// Falls back to ISBN lookup first if an isbn is available (most precise).
+// canonicalTitle: the full series name from AniList/Jikan (e.g. "Demon Slayer:
+//   Kimetsu no Yaiba"). When present it disambiguates series that share a short
+//   name (e.g. "Demon Slayer" ↔ spin-off "Kimetsu Academy"). Falls back to
+//   cleanTitleForSearch(title) when not available.
 async function fetchVolumeSpecificCover(
   title: string,
   volNum: number,
   isbn: string | null,
-  apiKey?: string
+  apiKey?: string,
+  canonicalTitle?: string
 ): Promise<string | null> {
   const key = apiKey || import.meta.env.VITE_GOOGLE_BOOKS_API_KEY || ''
 
@@ -288,13 +291,21 @@ async function fetchVolumeSpecificCover(
     } catch { /* fall through */ }
   }
 
-  // ── 2. Full-title search — keeps "Vol 2", "Volume 3", "#5", etc. ──────────
-  // Try several query formulations and pick the first with a matching cover.
-  const seriesTitle = cleanTitleForSearch(title)
+  // ── 2. Full-title search — uses canonical title when available ────────────
+  // Using the canonical title (e.g. "Demon Slayer: Kimetsu no Yaiba") instead
+  // of the short cleaned title ("Demon Slayer") stops spin-offs / adaptations
+  // with a similar short name from winning the similarity race.
+  const baseTitle = canonicalTitle
+    ? cleanTitleForSearch(canonicalTitle)   // strip any trailing vol/season from canonical
+    : cleanTitleForSearch(title)
+
+  // Strip chars that confuse quoted Google Books queries (colons, parens, etc.)
+  const safeTitle = baseTitle.replace(/[:"'()[\]]/g, ' ').replace(/\s+/g, ' ').trim()
+
   const queries = [
-    `"${seriesTitle}" "volume ${volNum}" manga`,
-    `"${seriesTitle}" "vol ${volNum}" manga`,
-    `intitle:"${seriesTitle}" intitle:"${volNum}"`,
+    `"${safeTitle}" "volume ${volNum}" manga`,
+    `"${safeTitle}" "vol ${volNum}" manga`,
+    `intitle:"${safeTitle}" intitle:"${volNum}"`,
   ]
 
   for (const q of queries) {
@@ -302,7 +313,7 @@ async function fetchVolumeSpecificCover(
       await sleep(API_DELAY_MS)
       const params: Record<string, string> = {
         q,
-        maxResults: '5',
+        maxResults: '8',
         printType: 'books',
       }
       if (key) params.key = key
@@ -312,13 +323,22 @@ async function fetchVolumeSpecificCover(
       if (!res.ok) continue
       const data = await res.json()
 
+      // Collect all valid candidates and pick the BEST match, not just the first
+      // above the threshold. This prevents a shorter/different spin-off title
+      // from winning because it happened to appear first in the result list.
+      let bestCover: string | null = null
+      let bestScore = 0
+
       for (const item of data.items || []) {
         const info = item.volumeInfo
         const resultTitle: string = info?.title || ''
 
-        // Must match the series name
-        const seriesSim = titleSimilarity(seriesTitle, resultTitle)
-        if (seriesSim < SIMILARITY_THRESHOLD) continue
+        // Must match the series name — score against both the base title we
+        // searched with AND the original entry title (whichever is higher).
+        const simBase = titleSimilarity(safeTitle, resultTitle)
+        const simOrig = titleSimilarity(title, resultTitle)
+        const sim = Math.max(simBase, simOrig)
+        if (sim < SIMILARITY_THRESHOLD) continue
 
         // Must mention the right volume number somewhere in title or subtitle
         const fullText = `${resultTitle} ${info?.subtitle || ''}`.toLowerCase()
@@ -334,8 +354,15 @@ async function fetchVolumeSpecificCover(
         if (!raw) continue
 
         const cover = sanitizeCoverUrl(raw)
-        if (isValidCoverUrl(cover)) return cover
+        if (!isValidCoverUrl(cover)) continue
+
+        if (sim > bestScore) {
+          bestScore = sim
+          bestCover = cover
+        }
       }
+
+      if (bestCover) return bestCover
     } catch { /* try next query */ }
   }
 
@@ -598,15 +625,10 @@ export const useCollectionStore = create<CollectionState>((set, get) => ({
           // Google Books has per-volume covers; AniList/Jikan only have the
           // series cover (always Vol. 1), so we skip their cover for these.
 
-          // ── 1. Google Books volume-specific cover (primary) ───────────────
-          coverUrl = await fetchVolumeSpecificCover(
-            title,
-            volNum,
-            entry.series.isbn,
-            storedKey
-          )
-
-          // ── 2. AniList — metadata only (their cover is always series/vol-1) ─
+          // ── 1. AniList first — get canonical title for disambiguation ─────
+          // AniList knows "Demon Slayer" → "Demon Slayer: Kimetsu no Yaiba".
+          // Passing the full canonical title to Google Books prevents spin-offs
+          // or adaptations with a similar short name from winning.
           const aliResult = await fetchAniListCover(title)
           if (aliResult) {
             metaUpdates = aliResult.meta
@@ -614,6 +636,15 @@ export const useCollectionStore = create<CollectionState>((set, get) => ({
             // returns the series cover (vol 1). Using it here would reproduce
             // the exact bug we're fixing.
           }
+
+          // ── 2. Google Books volume-specific cover (primary) ───────────────
+          coverUrl = await fetchVolumeSpecificCover(
+            title,
+            volNum,
+            entry.series.isbn,
+            storedKey,
+            aliResult?.matchedTitle  // disambiguates e.g. Demon Slayer vs Kimetsu Academy
+          )
 
           // ── 3. Jikan — metadata only for the same reason ─────────────────
           if (!metaUpdates.description || !metaUpdates.total_volumes) {
